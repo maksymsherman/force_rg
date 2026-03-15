@@ -57,22 +57,20 @@ print_dry_run_plan() {
   echo "  $REPO/raw/main/install.sh"
   echo "Repo files this installer may execute after cloning:"
   echo "  install.sh"
-  echo "  scripts/configure_claude_hook.py"
-  echo "  scripts/configure_gemini_hook.py"
+  echo "  src/main.rs"
   echo "Planned actions:"
   echo "  1. git clone --depth 1 $REPO <tmp>/force_rg"
   echo "  2. (cd <tmp>/force_rg && cargo build --release --quiet)"
   echo "  3. Compare <tmp>/force_rg/target/release/$BINARY_NAME against $INSTALL_DIR/$BINARY_NAME"
   echo "  4. Install or update $INSTALL_DIR/$BINARY_NAME if needed"
-  echo "  5. If present, update $HOME/.claude/settings.json via scripts/configure_claude_hook.py"
-  echo "  6. If present, update $HOME/.gemini/settings.json via scripts/configure_gemini_hook.py"
+  echo "  5. If Claude Code is present, update $HOME/.claude/settings.json via $BINARY_NAME --configure-claude-hook"
+  echo "  6. If Gemini CLI is present, update $HOME/.gemini/settings.json via $BINARY_NAME --configure-gemini-hook"
   echo "  7. Copy SKILL.md to $codex_home_dir/skills/force-rg/SKILL.md"
   echo "Inspect locally before running:"
   echo "  git clone $REPO"
   echo "  cd force_rg"
   echo "  sed -n '1,260p' install.sh"
-  echo "  sed -n '1,220p' scripts/configure_claude_hook.py"
-  echo "  sed -n '1,220p' scripts/configure_gemini_hook.py"
+  echo "  sed -n '1,260p' src/main.rs"
 }
 
 while [ "$#" -gt 0 ]; do
@@ -175,10 +173,7 @@ if [ -d "${HOME}/.claude" ]; then
   info "Detected Claude Code"
 
   if [ -f "$CLAUDE_SETTINGS" ]; then
-    uv --directory "$TMPDIR/force_rg" run --isolated python \
-      "$TMPDIR/force_rg/scripts/configure_claude_hook.py" \
-      "$CLAUDE_SETTINGS" \
-      "$BINARY_NAME"
+    "$SOURCE_BINARY" --configure-claude-hook "$CLAUDE_SETTINGS" "$BINARY_NAME"
     ok "Claude Code configured"
   else
     warn "Claude Code detected but could not configure hooks automatically"
@@ -202,10 +197,7 @@ if [ -d "${HOME}/.gemini" ]; then
 
   [ -f "$GEMINI_SETTINGS" ] || echo '{}' > "$GEMINI_SETTINGS"
 
-  uv --directory "$TMPDIR/force_rg" run --isolated python \
-    "$TMPDIR/force_rg/scripts/configure_gemini_hook.py" \
-    "$GEMINI_SETTINGS" \
-    "$BINARY_NAME"
+  "$SOURCE_BINARY" --configure-gemini-hook "$GEMINI_SETTINGS" "$BINARY_NAME"
   ok "Gemini CLI configured"
 fi
 

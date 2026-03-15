@@ -1,9 +1,12 @@
 use std::env;
+use std::fs;
 use std::io::{self, Read};
 use std::process;
 use std::time::Instant;
 
-const GREP_MESSAGE: &str = "Use rg (ripgrep) instead of grep in this project. ripgrep is faster, respects .gitignore, and uses modern regex by default. Replace the blocked command with the equivalent 'rg ...' command.";
+use serde_json::{json, Map, Value};
+
+const GREP_MESSAGE: &str = "Use rg (ripgrep) instead of grep in this project. Replace blocked grep commands with the least invasive exact rg rewrite when the flag mapping is clear. If a flag does not have a guaranteed direct rg translation, translate it manually instead of guessing.";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct BlockDecision {
@@ -85,6 +88,20 @@ fn run() -> Result<i32, String> {
             println!("avg_us={avg_us:.4}");
             Ok(0)
         }
+        Mode::ConfigureClaudeHook {
+            settings_path,
+            binary_name,
+        } => {
+            configure_claude_hook(&settings_path, &binary_name)?;
+            Ok(0)
+        }
+        Mode::ConfigureGeminiHook {
+            settings_path,
+            binary_name,
+        } => {
+            configure_gemini_hook(&settings_path, &binary_name)?;
+            Ok(0)
+        }
     }
 }
 
@@ -95,8 +112,22 @@ struct Config {
 
 #[derive(Debug)]
 enum Mode {
-    Evaluate { input: InputMode, claude_json: bool },
-    Benchmark { command: String, iterations: u64 },
+    Evaluate {
+        input: InputMode,
+        claude_json: bool,
+    },
+    Benchmark {
+        command: String,
+        iterations: u64,
+    },
+    ConfigureClaudeHook {
+        settings_path: String,
+        binary_name: String,
+    },
+    ConfigureGeminiHook {
+        settings_path: String,
+        binary_name: String,
+    },
 }
 
 #[derive(Debug)]
@@ -114,6 +145,8 @@ impl Config {
         let mut input: Option<InputMode> = None;
         let mut claude_json = false;
         let mut benchmark_command: Option<String> = None;
+        let mut configure_claude_hook: Option<(String, String)> = None;
+        let mut configure_gemini_hook: Option<(String, String)> = None;
         let mut iterations = 100_000u64;
 
         let mut iter = args.into_iter();
@@ -143,6 +176,24 @@ impl Config {
                         .next()
                         .ok_or_else(|| "missing value for --benchmark-command".to_string())?;
                     benchmark_command = Some(value);
+                }
+                "--configure-claude-hook" => {
+                    let settings_path = iter.next().ok_or_else(|| {
+                        "missing settings path for --configure-claude-hook".to_string()
+                    })?;
+                    let binary_name = iter.next().ok_or_else(|| {
+                        "missing binary name for --configure-claude-hook".to_string()
+                    })?;
+                    configure_claude_hook = Some((settings_path, binary_name));
+                }
+                "--configure-gemini-hook" => {
+                    let settings_path = iter.next().ok_or_else(|| {
+                        "missing settings path for --configure-gemini-hook".to_string()
+                    })?;
+                    let binary_name = iter.next().ok_or_else(|| {
+                        "missing binary name for --configure-gemini-hook".to_string()
+                    })?;
+                    configure_gemini_hook = Some((settings_path, binary_name));
                 }
                 "--iterations" => {
                     let value = iter
@@ -176,6 +227,24 @@ impl Config {
             });
         }
 
+        if let Some((settings_path, binary_name)) = configure_claude_hook {
+            return Ok(Self {
+                mode: Mode::ConfigureClaudeHook {
+                    settings_path,
+                    binary_name,
+                },
+            });
+        }
+
+        if let Some((settings_path, binary_name)) = configure_gemini_hook {
+            return Ok(Self {
+                mode: Mode::ConfigureGeminiHook {
+                    settings_path,
+                    binary_name,
+                },
+            });
+        }
+
         let input = input.ok_or_else(|| {
             "expected one of --command, --stdin-command, or --claude-hook-json".to_string()
         })?;
@@ -188,7 +257,7 @@ impl Config {
 
 fn print_usage() {
     println!(
-        "Usage:\n  enforce-rg-command --command \"grep -rn pattern .\" [--claude-json]\n  enforce-rg-command --stdin-command [--claude-json]\n  enforce-rg-command --claude-hook-json\n  enforce-rg-command --gemini-hook-json\n  enforce-rg-command --benchmark-command \"grep -rn pattern .\" [--iterations 1000000]"
+        "Usage:\n  enforce-rg-command --command \"grep -rn pattern .\" [--claude-json]\n  enforce-rg-command --stdin-command [--claude-json]\n  enforce-rg-command --claude-hook-json\n  enforce-rg-command --gemini-hook-json\n  enforce-rg-command --benchmark-command \"grep -rn pattern .\" [--iterations 1000000]\n  enforce-rg-command --configure-claude-hook <settings-path> <binary-name>\n  enforce-rg-command --configure-gemini-hook <settings-path> <binary-name>"
     );
 }
 
@@ -400,23 +469,29 @@ fn evaluate_segment(tokens: &[ParsedToken]) -> Option<BlockDecision> {
 }
 
 fn build_grep_decision(tokens: &[ParsedToken], command_index: usize) -> BlockDecision {
-    let suggestion = rewrite_grep_to_rg(tokens, command_index);
-    BlockDecision::new(format_exact_suggestion(GREP_MESSAGE, &suggestion))
+    match rewrite_grep_to_rg(tokens, command_index) {
+        GrepRewrite::Exact(suggestion) => {
+            BlockDecision::new(format_exact_suggestion(GREP_MESSAGE, &suggestion))
+        }
+        GrepRewrite::NeedsManualTranslation { flags } => {
+            BlockDecision::new(format_manual_translation_message(GREP_MESSAGE, &flags))
+        }
+    }
 }
 
-/// Rewrite a grep/egrep/fgrep command to the equivalent rg command.
-///
-/// - Replaces `grep`/`egrep`/`fgrep` with `rg`
-/// - Adds `-F` for `fgrep` or `grep -F`/`grep --fixed-strings`
-/// - Drops flags that are default in rg: `-r`, `-n`, `-E`, `--recursive`,
-///   `--line-number`, `--extended-regexp`, `--color=auto`, `--color=always`
-/// - Strips redundant chars from combined short flags (e.g. `-rni` -> `-i`)
-fn rewrite_grep_to_rg(tokens: &[ParsedToken], command_index: usize) -> String {
+enum GrepRewrite {
+    Exact(String),
+    NeedsManualTranslation { flags: Vec<String> },
+}
+
+/// Rewrite a grep/egrep/fgrep command to the equivalent rg command when the
+/// mapping is high confidence. Otherwise return the flags that need manual
+/// translation before switching to rg.
+fn rewrite_grep_to_rg(tokens: &[ParsedToken], command_index: usize) -> GrepRewrite {
     let cmd_name = normalized_program_name(tokens[command_index].value.as_bytes());
     let is_fgrep = cmd_name == b"fgrep";
-    let is_egrep = cmd_name == b"egrep";
-
     let mut parts: Vec<String> = Vec::with_capacity(tokens.len() + 2);
+    let mut uncertain_flags = Vec::new();
 
     // Preserve wrapper tokens before the command.
     parts.extend(
@@ -432,50 +507,65 @@ fn rewrite_grep_to_rg(tokens: &[ParsedToken], command_index: usize) -> String {
     }
 
     let mut need_fixed_strings = false;
+    let mut end_of_options = false;
     let rest = &tokens[command_index + 1..];
 
     for token in rest {
         let val = token.value.as_str();
 
-        // Drop long flags that are redundant in rg.
-        if matches!(
-            val,
-            "--recursive"
-                | "--line-number"
-                | "--extended-regexp"
-                | "--color=auto"
-                | "--color=always"
-                | "--colour=auto"
-                | "--colour=always"
-        ) {
+        if end_of_options || !val.starts_with('-') || val == "-" {
+            parts.push(token.raw.clone());
             continue;
         }
 
-        if val == "--fixed-strings" {
-            need_fixed_strings = true;
+        if val == "--" {
+            parts.push(token.raw.clone());
+            end_of_options = true;
             continue;
         }
 
-        // Drop single-char flags that are redundant in rg, handling combined flags.
-        if val.starts_with('-') && !val.starts_with("--") && val.len() > 1 {
-            let cleaned = strip_redundant_short_flags(val, is_egrep);
-            match cleaned {
-                FlagResult::Drop => continue,
-                FlagResult::NeedFixedStrings(remaining) => {
-                    need_fixed_strings = true;
-                    if let Some(flags) = remaining {
-                        parts.push(flags);
-                    }
+        if val.starts_with("--") {
+            match classify_long_grep_flag(val) {
+                LongFlagResult::Drop => continue,
+                LongFlagResult::Keep(flag) => {
+                    parts.push(flag);
                     continue;
                 }
-                FlagResult::Keep(flags) => {
-                    parts.push(flags);
+                LongFlagResult::NeedFixedStrings => {
+                    need_fixed_strings = true;
+                    continue;
+                }
+                LongFlagResult::Uncertain => {
+                    uncertain_flags.push(token.raw.clone());
                     continue;
                 }
             }
         }
 
-        parts.push(token.raw.clone());
+        match classify_short_grep_flag(val) {
+            ShortFlagResult::Drop => continue,
+            ShortFlagResult::Keep(flags) => {
+                parts.push(flags);
+                continue;
+            }
+            ShortFlagResult::NeedFixedStrings(remaining) => {
+                need_fixed_strings = true;
+                if let Some(flags) = remaining {
+                    parts.push(flags);
+                }
+                continue;
+            }
+            ShortFlagResult::Uncertain => {
+                uncertain_flags.push(token.raw.clone());
+                continue;
+            }
+        }
+    }
+
+    if !uncertain_flags.is_empty() {
+        return GrepRewrite::NeedsManualTranslation {
+            flags: uncertain_flags,
+        };
     }
 
     // Insert -F right after rg if needed and not already present from fgrep.
@@ -484,30 +574,91 @@ fn rewrite_grep_to_rg(tokens: &[ParsedToken], command_index: usize) -> String {
         parts.insert(rg_pos + 1, "-F".to_string());
     }
 
-    parts.join(" ")
+    GrepRewrite::Exact(parts.join(" "))
 }
 
-enum FlagResult {
-    /// Drop the entire flag token.
+enum LongFlagResult {
     Drop,
-    /// Keep the flag (possibly cleaned).
     Keep(String),
-    /// The flag contained -F; optionally keep remaining flags.
-    NeedFixedStrings(Option<String>),
+    NeedFixedStrings,
+    Uncertain,
 }
 
-/// Strip redundant short flag characters (r, n, E) from a combined flag like `-rnli`.
-/// Returns the cleaned flag or signals it should be dropped entirely.
-fn strip_redundant_short_flags(flag: &str, _is_egrep: bool) -> FlagResult {
+enum ShortFlagResult {
+    Drop,
+    Keep(String),
+    NeedFixedStrings(Option<String>),
+    Uncertain,
+}
+
+fn classify_long_grep_flag(flag: &str) -> LongFlagResult {
+    match flag {
+        "--recursive" | "--line-number" | "--extended-regexp" => LongFlagResult::Drop,
+        "--fixed-strings" => LongFlagResult::NeedFixedStrings,
+        "--colour" => LongFlagResult::Keep("--color".to_string()),
+        "--ignore-case"
+        | "--invert-match"
+        | "--word-regexp"
+        | "--line-regexp"
+        | "--files-with-matches"
+        | "--files-without-match"
+        | "--count"
+        | "--only-matching"
+        | "--quiet"
+        | "--regexp"
+        | "--file"
+        | "--after-context"
+        | "--before-context"
+        | "--context"
+        | "--max-count"
+        | "--color"
+        | "--with-filename"
+        | "--no-filename" => LongFlagResult::Keep(flag.to_string()),
+        _ if flag.starts_with("--regexp=")
+            || flag.starts_with("--file=")
+            || flag.starts_with("--after-context=")
+            || flag.starts_with("--before-context=")
+            || flag.starts_with("--context=")
+            || flag.starts_with("--max-count=") =>
+        {
+            LongFlagResult::Keep(flag.to_string())
+        }
+        _ if matches!(flag, "--color=auto" | "--color=always" | "--color=never") => {
+            LongFlagResult::Keep(flag.to_string())
+        }
+        _ if matches!(flag, "--colour=auto" | "--colour=always" | "--colour=never") => {
+            LongFlagResult::Keep(flag.replacen("--colour", "--color", 1))
+        }
+        _ => LongFlagResult::Uncertain,
+    }
+}
+
+fn classify_short_grep_flag(flag: &str) -> ShortFlagResult {
+    if flag.len() == 2 {
+        return match flag.as_bytes()[1] as char {
+            'r' | 'n' | 'E' => ShortFlagResult::Drop,
+            'F' => ShortFlagResult::NeedFixedStrings(None),
+            ch if is_safe_no_value_short_grep_flag(ch) || is_safe_value_short_grep_flag(ch) => {
+                ShortFlagResult::Keep(flag.to_string())
+            }
+            _ => ShortFlagResult::Uncertain,
+        };
+    }
+
+    if is_safe_attached_numeric_short_flag(flag) {
+        return ShortFlagResult::Keep(flag.to_string());
+    }
+
     let chars: Vec<char> = flag[1..].chars().collect();
     let mut kept = Vec::new();
     let mut had_fixed = false;
 
     for &ch in &chars {
         match ch {
-            'r' | 'n' | 'E' => {} // redundant in rg, drop
+            'r' | 'n' | 'E' => {}
             'F' => had_fixed = true,
-            _ => kept.push(ch),
+            ch if is_safe_no_value_short_grep_flag(ch) => kept.push(ch),
+            _ => return ShortFlagResult::Uncertain,
         }
     }
 
@@ -520,21 +671,52 @@ fn strip_redundant_short_flags(flag: &str, _is_egrep: bool) -> FlagResult {
             s.extend(kept);
             Some(s)
         };
-        return FlagResult::NeedFixedStrings(remaining);
+        return ShortFlagResult::NeedFixedStrings(remaining);
     }
 
     if kept.is_empty() {
-        return FlagResult::Drop;
+        return ShortFlagResult::Drop;
     }
 
     let mut s = String::with_capacity(kept.len() + 1);
     s.push('-');
     s.extend(kept);
-    FlagResult::Keep(s)
+    ShortFlagResult::Keep(s)
+}
+
+fn is_safe_no_value_short_grep_flag(ch: char) -> bool {
+    matches!(
+        ch,
+        'a' | 'c' | 'H' | 'i' | 'I' | 'l' | 'o' | 'q' | 'v' | 'w' | 'x'
+    )
+}
+
+fn is_safe_value_short_grep_flag(ch: char) -> bool {
+    matches!(ch, 'A' | 'B' | 'C' | 'e' | 'f' | 'm')
+}
+
+fn is_safe_attached_numeric_short_flag(flag: &str) -> bool {
+    ["-A", "-B", "-C", "-m"].iter().any(|prefix| {
+        flag.strip_prefix(prefix)
+            .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|byte| byte.is_ascii_digit()))
+    })
 }
 
 fn format_exact_suggestion(base: &str, suggestion: &str) -> String {
     format!("{base}\nSuggested replacement:\n  {suggestion}")
+}
+
+fn format_manual_translation_message(base: &str, flags: &[String]) -> String {
+    let mut message = String::from(base);
+    message.push_str("\nFlags requiring manual translation before switching to rg:");
+    for flag in flags {
+        message.push_str("\n  ");
+        message.push_str(flag);
+    }
+    message.push_str(
+        "\nTranslate those flags manually after checking `rg --help` instead of assuming they behave the same.",
+    );
+    message
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -649,6 +831,123 @@ fn is_shell_assignment(token: &[u8]) -> bool {
     head[1..]
         .iter()
         .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+}
+
+fn configure_claude_hook(settings_path: &str, binary_name: &str) -> Result<(), String> {
+    configure_agent_hook(
+        settings_path,
+        "PreToolUse",
+        "Bash",
+        &format!("{binary_name} --claude-hook-json"),
+    )
+}
+
+fn configure_gemini_hook(settings_path: &str, binary_name: &str) -> Result<(), String> {
+    configure_agent_hook(
+        settings_path,
+        "BeforeTool",
+        "run_shell_command",
+        &format!("{binary_name} --gemini-hook-json"),
+    )
+}
+
+fn configure_agent_hook(
+    settings_path: &str,
+    phase: &str,
+    matcher: &str,
+    hook_command: &str,
+) -> Result<(), String> {
+    let input = fs::read_to_string(settings_path)
+        .map_err(|error| format!("failed to read {settings_path}: {error}"))?;
+    let mut settings: Value = serde_json::from_str(&input)
+        .map_err(|error| format!("failed to parse {settings_path} as JSON: {error}"))?;
+
+    update_hook_settings(&mut settings, phase, matcher, hook_command)?;
+
+    let mut serialized = serde_json::to_string_pretty(&settings)
+        .map_err(|error| format!("failed to serialize updated settings: {error}"))?;
+    serialized.push('\n');
+    fs::write(settings_path, serialized)
+        .map_err(|error| format!("failed to write {settings_path}: {error}"))?;
+    Ok(())
+}
+
+fn update_hook_settings(
+    settings: &mut Value,
+    phase: &str,
+    matcher: &str,
+    hook_command: &str,
+) -> Result<(), String> {
+    let settings_obj = ensure_object(settings, "settings root")?;
+    let hooks = settings_obj
+        .entry("hooks".to_string())
+        .or_insert_with(|| Value::Object(Map::new()));
+    let hooks_obj = ensure_object(hooks, "`hooks`")?;
+    let phase_list = hooks_obj
+        .entry(phase.to_string())
+        .or_insert_with(|| Value::Array(Vec::new()));
+    let entries = ensure_array(phase_list, phase)?;
+
+    let mut matched_entry_index = None;
+    for (index, entry) in entries.iter().enumerate() {
+        if entry
+            .as_object()
+            .and_then(|value| value.get("matcher"))
+            .and_then(Value::as_str)
+            == Some(matcher)
+        {
+            matched_entry_index = Some(index);
+            break;
+        }
+    }
+
+    if matched_entry_index.is_none() {
+        entries.push(json!({
+            "matcher": matcher,
+            "hooks": [],
+        }));
+        matched_entry_index = Some(entries.len() - 1);
+    }
+
+    let entry = entries
+        .get_mut(matched_entry_index.unwrap())
+        .ok_or_else(|| "failed to select hook entry".to_string())?;
+    let entry_obj = ensure_object(entry, "hook entry")?;
+    let hook_list = entry_obj
+        .entry("hooks".to_string())
+        .or_insert_with(|| Value::Array(Vec::new()));
+    let hooks_array = ensure_array(hook_list, "hook list")?;
+
+    if hooks_array.iter().any(|hook| {
+        hook.as_object()
+            .and_then(|value| value.get("command"))
+            .and_then(Value::as_str)
+            .is_some_and(|command| command.contains(hook_command))
+    }) {
+        return Ok(());
+    }
+
+    hooks_array.push(json!({
+        "type": "command",
+        "command": hook_command,
+    }));
+
+    Ok(())
+}
+
+fn ensure_object<'a>(
+    value: &'a mut Value,
+    context: &str,
+) -> Result<&'a mut Map<String, Value>, String> {
+    value
+        .as_object_mut()
+        .ok_or_else(|| format!("{context} must be a JSON object"))
+}
+
+fn ensure_array<'a>(value: &'a mut Value, context: &str) -> Result<&'a mut Vec<Value>, String> {
+    value
+        .as_array_mut()
+        .ok_or_else(|| format!("{context} must be a JSON array"))
 }
 
 fn extract_claude_command(input: &str) -> Result<String, String> {
@@ -976,6 +1275,7 @@ impl<'a> JsonParser<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn decision_message(command: &str) -> String {
         evaluate_command(command).unwrap().message
@@ -1042,7 +1342,7 @@ mod tests {
         assert!(message.contains("rg 'foo|bar' ."));
 
         let message = decision_message("grep --color=auto pattern file.txt");
-        assert!(message.contains("rg pattern file.txt"));
+        assert!(message.contains("rg --color=auto pattern file.txt"));
     }
 
     #[test]
@@ -1055,9 +1355,43 @@ mod tests {
     }
 
     #[test]
+    fn preserves_supported_color_flags() {
+        let message = decision_message("grep --color=always pattern file.txt");
+        assert!(message.contains("rg --color=always pattern file.txt"));
+
+        let message = decision_message("grep --colour=always pattern file.txt");
+        assert!(message.contains("rg --color=always pattern file.txt"));
+    }
+
+    #[test]
+    fn requires_manual_translation_for_uncertain_flags() {
+        let message = decision_message("grep -s pattern file.txt");
+        assert!(message.contains("Flags requiring manual translation"));
+        assert!(message.contains("\n  -s"));
+        assert!(!message.contains("Suggested replacement:"));
+
+        let message = decision_message("grep -h pattern file.txt");
+        assert!(message.contains("\n  -h"));
+
+        let message = decision_message("grep -L pattern file.txt");
+        assert!(message.contains("\n  -L"));
+
+        let message = decision_message("grep --include='*.rs' TODO .");
+        assert!(message.contains("--include='*.rs'"));
+        assert!(!message.contains("Suggested replacement:"));
+    }
+
+    #[test]
+    fn respects_end_of_options_marker() {
+        let message = decision_message("grep -- -foo file.txt");
+        assert!(message.contains("rg -- -foo file.txt"));
+    }
+
+    #[test]
     fn allows_rg_usage() {
         assert_eq!(evaluate_command("rg pattern ."), None);
         assert_eq!(evaluate_command("rg -i pattern file.txt"), None);
+        assert_eq!(evaluate_command("ripgrep pattern ."), None);
         assert_eq!(evaluate_command("sudo rg pattern /var/log"), None);
     }
 
@@ -1128,6 +1462,41 @@ mod tests {
         assert_eq!(
             extract_claude_command(input).unwrap(),
             "grep -rn \"pattern\" .".to_string()
+        );
+    }
+
+    #[test]
+    fn updates_hook_settings_without_duplicates() {
+        let mut settings = json!({});
+
+        update_hook_settings(
+            &mut settings,
+            "PreToolUse",
+            "Bash",
+            "enforce-rg-command --claude-hook-json",
+        )
+        .unwrap();
+        update_hook_settings(
+            &mut settings,
+            "PreToolUse",
+            "Bash",
+            "enforce-rg-command --claude-hook-json",
+        )
+        .unwrap();
+
+        assert_eq!(
+            settings,
+            json!({
+              "hooks": {
+                "PreToolUse": [{
+                  "matcher": "Bash",
+                  "hooks": [{
+                    "type": "command",
+                    "command": "enforce-rg-command --claude-hook-json"
+                  }]
+                }]
+              }
+            })
         );
     }
 }

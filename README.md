@@ -1,6 +1,6 @@
 # force_rg
 
-A policy tool that redirects coding agents away from `grep`/`egrep`/`fgrep` commands toward [`rg` (ripgrep)](https://github.com/BurntSushi/ripgrep), with smart flag translation.
+A policy tool that redirects coding agents away from `grep`/`egrep`/`fgrep` commands toward [`rg` (ripgrep)](https://github.com/BurntSushi/ripgrep), with conservative exact rewrites.
 
 ## What gets blocked
 
@@ -8,7 +8,7 @@ A policy tool that redirects coding agents away from `grep`/`egrep`/`fgrep` comm
 
 ## What gets suggested
 
-- Exact rewrites with redundant flags removed:
+- Exact rewrites when the flag mapping is clear:
   - `grep -rn pattern .` -> `rg pattern .` (recursive and line numbers are defaults in rg)
   - `grep -ri pattern .` -> `rg -i pattern .`
   - `grep -rl pattern .` -> `rg -l pattern .`
@@ -19,13 +19,15 @@ A policy tool that redirects coding agents away from `grep`/`egrep`/`fgrep` comm
 - Flag preservation for meaningful options:
   - `-i`, `-v`, `-w`, `-l`, `-c`, `-o`, `-A`, `-B`, `-C`, etc. are kept as-is
 
+If a `grep` flag does not have a guaranteed direct `rg` translation, the tool blocks and tells you to translate that flag manually instead of guessing.
+
 ## Quick install
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_rg/main/install.sh | bash
 ```
 
-This builds the binary, installs it to `~/.local/bin/`, auto-configures hooks for any detected agents (Claude Code, Gemini CLI), and installs the Codex skill at `~/.codex/skills/force-rg`. Requires Rust/Cargo and `rg`.
+This builds the binary, installs it to `~/.local/bin/`, auto-configures hooks for any detected agents (Claude Code, Gemini CLI), and installs the Codex skill at `~/.codex/skills/force-rg` even if Codex has not been launched yet. Requires Rust/Cargo and `rg`.
 
 The installer compares the built binary against the installed one with SHA-256:
 
@@ -57,8 +59,7 @@ Review the actual repo files locally:
 git clone https://github.com/maksymsherman/force_rg.git
 cd force_rg
 sed -n '1,260p' install.sh
-sed -n '1,220p' scripts/configure_claude_hook.py
-sed -n '1,220p' scripts/configure_gemini_hook.py
+sed -n '1,260p' src/main.rs
 ```
 
 ## Manual install
@@ -119,6 +120,7 @@ curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_rg/main/AGENTS.
 enforce-rg-command --command 'rg pattern .'           # exits 0
 enforce-rg-command --command 'grep -rn pattern .'     # exits 2, prints exact rg rewrite
 enforce-rg-command --command 'fgrep literal file.txt' # exits 2, prints rg -F rewrite
+enforce-rg-command --command 'grep -s pattern file.txt' # exits 2, asks for manual flag translation
 ```
 
 ## License

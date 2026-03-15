@@ -14,6 +14,8 @@ Use `rg` (ripgrep) instead of `grep` for all text searching.
 
 - Never run `grep`, `egrep`, or `fgrep`.
 - Use `rg` for all text searching, pattern matching, and file content filtering.
+- Prefer the least invasive exact `rg` rewrite when translating a `grep` command.
+- If a `grep` flag does not have a guaranteed direct `rg` translation, check `rg --help` and translate it manually instead of guessing.
 - `rg` is recursive by default — no `-r` flag needed.
 - `rg` shows line numbers by default — no `-n` flag needed.
 - `rg` uses extended regex by default — no `-E` flag needed.
