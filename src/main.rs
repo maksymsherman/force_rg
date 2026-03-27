@@ -286,29 +286,7 @@ fn escape_json(value: &str) -> String {
 }
 
 fn evaluate_command(command: &str) -> Option<BlockDecision> {
-    for segment in parse_segments(command) {
-        if let Some(decision) = evaluate_segment(&segment.tokens) {
-            return Some(decision);
-        }
-    }
-
-    None
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct ParsedToken<'a> {
-    raw: &'a str,
-    value: Cow<'a, str>,
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-struct ParsedSegment<'a> {
-    tokens: Vec<ParsedToken<'a>>,
-}
-
-fn parse_segments(command: &str) -> Vec<ParsedSegment<'_>> {
     let bytes = command.as_bytes();
-    let mut segments = Vec::new();
     let mut tokens = Vec::new();
     let mut token_start = None;
     let mut value: Option<Vec<u8>> = None;
@@ -374,11 +352,15 @@ fn parse_segments(command: &str) -> Vec<ParsedSegment<'_>> {
             }
             b';' => {
                 flush_parsed_token(command, index, &mut token_start, &mut value, &mut tokens);
-                flush_segment(&mut tokens, &mut segments);
+                if let Some(decision) = evaluate_parsed_segment(&mut tokens) {
+                    return Some(decision);
+                }
             }
             b'|' | b'&' => {
                 flush_parsed_token(command, index, &mut token_start, &mut value, &mut tokens);
-                flush_segment(&mut tokens, &mut segments);
+                if let Some(decision) = evaluate_parsed_segment(&mut tokens) {
+                    return Some(decision);
+                }
                 if index + 1 < bytes.len() && bytes[index + 1] == byte {
                     index += 1;
                 }
@@ -411,8 +393,13 @@ fn parse_segments(command: &str) -> Vec<ParsedSegment<'_>> {
         &mut value,
         &mut tokens,
     );
-    flush_segment(&mut tokens, &mut segments);
-    segments
+    evaluate_parsed_segment(&mut tokens)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ParsedToken<'a> {
+    raw: &'a str,
+    value: Cow<'a, str>,
 }
 
 fn ensure_owned_value<'a, 'b>(
@@ -446,14 +433,14 @@ fn flush_parsed_token<'a>(
     tokens.push(ParsedToken { raw, value });
 }
 
-fn flush_segment<'a>(tokens: &mut Vec<ParsedToken<'a>>, segments: &mut Vec<ParsedSegment<'a>>) {
+fn evaluate_parsed_segment(tokens: &mut Vec<ParsedToken<'_>>) -> Option<BlockDecision> {
     if tokens.is_empty() {
-        return;
+        return None;
     }
 
-    segments.push(ParsedSegment {
-        tokens: std::mem::take(tokens),
-    });
+    let decision = evaluate_segment(tokens);
+    tokens.clear();
+    decision
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -681,72 +668,73 @@ fn classify_long_grep_flag(flag: &str) -> LongFlagResult {
 }
 
 fn classify_short_grep_flag(flag: &str) -> ShortFlagResult {
-    if flag.len() == 2 {
-        return match flag.as_bytes()[1] as char {
-            'r' | 'n' | 'E' => ShortFlagResult::Drop,
-            'F' => ShortFlagResult::NeedFixedStrings(None),
-            ch if is_safe_no_value_short_grep_flag(ch) || is_safe_value_short_grep_flag(ch) => {
+    let bytes = flag.as_bytes();
+
+    if bytes.len() == 2 {
+        return match bytes[1] {
+            b'r' | b'n' | b'E' => ShortFlagResult::Drop,
+            b'F' => ShortFlagResult::NeedFixedStrings(None),
+            byte if is_safe_no_value_short_grep_flag(byte)
+                || is_safe_value_short_grep_flag(byte) =>
+            {
                 ShortFlagResult::Keep(flag.to_string())
             }
             _ => ShortFlagResult::Uncertain,
         };
     }
 
-    if is_safe_attached_numeric_short_flag(flag) {
+    if is_safe_attached_numeric_short_flag(bytes) {
         return ShortFlagResult::Keep(flag.to_string());
     }
 
-    let chars: Vec<char> = flag[1..].chars().collect();
-    let mut kept = Vec::new();
+    let mut kept = None::<String>;
     let mut had_fixed = false;
 
-    for &ch in &chars {
-        match ch {
-            'r' | 'n' | 'E' => {}
-            'F' => had_fixed = true,
-            ch if is_safe_no_value_short_grep_flag(ch) => kept.push(ch),
+    for &byte in &bytes[1..] {
+        match byte {
+            b'r' | b'n' | b'E' => {}
+            b'F' => had_fixed = true,
+            byte if is_safe_no_value_short_grep_flag(byte) => {
+                let kept = kept.get_or_insert_with(|| {
+                    let mut value = String::with_capacity(bytes.len());
+                    value.push('-');
+                    value
+                });
+                kept.push(byte as char);
+            }
             _ => return ShortFlagResult::Uncertain,
         }
     }
 
     if had_fixed {
-        let remaining = if kept.is_empty() {
-            None
-        } else {
-            let mut s = String::with_capacity(kept.len() + 1);
-            s.push('-');
-            s.extend(kept);
-            Some(s)
-        };
-        return ShortFlagResult::NeedFixedStrings(remaining);
+        return ShortFlagResult::NeedFixedStrings(kept);
     }
 
-    if kept.is_empty() {
+    if let Some(kept) = kept {
+        return ShortFlagResult::Keep(kept);
+    }
+
+    if bytes.len() > 2 {
         return ShortFlagResult::Drop;
     }
 
-    let mut s = String::with_capacity(kept.len() + 1);
-    s.push('-');
-    s.extend(kept);
-    ShortFlagResult::Keep(s)
+    ShortFlagResult::Uncertain
 }
 
-fn is_safe_no_value_short_grep_flag(ch: char) -> bool {
+fn is_safe_no_value_short_grep_flag(byte: u8) -> bool {
     matches!(
-        ch,
-        'a' | 'c' | 'H' | 'i' | 'I' | 'l' | 'o' | 'q' | 'v' | 'w' | 'x'
+        byte,
+        b'a' | b'c' | b'H' | b'i' | b'I' | b'l' | b'o' | b'q' | b'v' | b'w' | b'x'
     )
 }
 
-fn is_safe_value_short_grep_flag(ch: char) -> bool {
-    matches!(ch, 'A' | 'B' | 'C' | 'e' | 'f' | 'm')
+fn is_safe_value_short_grep_flag(byte: u8) -> bool {
+    matches!(byte, b'A' | b'B' | b'C' | b'e' | b'f' | b'm')
 }
 
-fn is_safe_attached_numeric_short_flag(flag: &str) -> bool {
-    ["-A", "-B", "-C", "-m"].iter().any(|prefix| {
-        flag.strip_prefix(prefix)
-            .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|byte| byte.is_ascii_digit()))
-    })
+fn is_safe_attached_numeric_short_flag(flag: &[u8]) -> bool {
+    matches!(flag, [b'-', b'A' | b'B' | b'C' | b'm', rest @ ..] if !rest.is_empty()
+        && rest.iter().all(|byte| byte.is_ascii_digit()))
 }
 
 fn format_exact_suggestion(base: &str, suggestion: &str) -> String {
@@ -1399,6 +1387,9 @@ mod tests {
 
         let message = decision_message("grep --fixed-strings 'literal' file.txt");
         assert!(message.contains("rg -F 'literal' file.txt"));
+
+        let message = decision_message("grep -rFiv 'literal' file.txt");
+        assert!(message.contains("rg -F -iv 'literal' file.txt"));
     }
 
     #[test]
