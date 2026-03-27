@@ -490,20 +490,25 @@ enum GrepRewrite {
 fn rewrite_grep_to_rg(tokens: &[ParsedToken], command_index: usize) -> GrepRewrite {
     let cmd_name = normalized_program_name(tokens[command_index].value.as_bytes());
     let is_fgrep = cmd_name == b"fgrep";
-    let mut parts: Vec<String> = Vec::with_capacity(tokens.len() + 2);
+    let estimated_len = tokens
+        .iter()
+        .map(|token| token.raw.len() + 1)
+        .sum::<usize>()
+        + 4;
+    let mut suggestion = String::with_capacity(estimated_len);
     let mut uncertain_flags = Vec::new();
+    let mut has_parts = false;
 
     // Preserve wrapper tokens before the command.
-    parts.extend(
-        tokens[..command_index]
-            .iter()
-            .map(|token| token.raw.clone()),
-    );
+    for token in &tokens[..command_index] {
+        push_suggestion_part(&mut suggestion, &token.raw, &mut has_parts);
+    }
 
-    parts.push("rg".to_string());
+    push_suggestion_part(&mut suggestion, "rg", &mut has_parts);
+    let fixed_strings_insert_at = suggestion.len();
 
     if is_fgrep {
-        parts.push("-F".to_string());
+        push_suggestion_part(&mut suggestion, "-F", &mut has_parts);
     }
 
     let mut need_fixed_strings = false;
@@ -514,12 +519,12 @@ fn rewrite_grep_to_rg(tokens: &[ParsedToken], command_index: usize) -> GrepRewri
         let val = token.value.as_str();
 
         if end_of_options || !val.starts_with('-') || val == "-" {
-            parts.push(token.raw.clone());
+            push_suggestion_part(&mut suggestion, &token.raw, &mut has_parts);
             continue;
         }
 
         if val == "--" {
-            parts.push(token.raw.clone());
+            push_suggestion_part(&mut suggestion, &token.raw, &mut has_parts);
             end_of_options = true;
             continue;
         }
@@ -528,7 +533,7 @@ fn rewrite_grep_to_rg(tokens: &[ParsedToken], command_index: usize) -> GrepRewri
             match classify_long_grep_flag(val) {
                 LongFlagResult::Drop => continue,
                 LongFlagResult::Keep(flag) => {
-                    parts.push(flag);
+                    push_suggestion_part(&mut suggestion, &flag, &mut has_parts);
                     continue;
                 }
                 LongFlagResult::NeedFixedStrings => {
@@ -545,13 +550,13 @@ fn rewrite_grep_to_rg(tokens: &[ParsedToken], command_index: usize) -> GrepRewri
         match classify_short_grep_flag(val) {
             ShortFlagResult::Drop => continue,
             ShortFlagResult::Keep(flags) => {
-                parts.push(flags);
+                push_suggestion_part(&mut suggestion, &flags, &mut has_parts);
                 continue;
             }
             ShortFlagResult::NeedFixedStrings(remaining) => {
                 need_fixed_strings = true;
                 if let Some(flags) = remaining {
-                    parts.push(flags);
+                    push_suggestion_part(&mut suggestion, &flags, &mut has_parts);
                 }
                 continue;
             }
@@ -570,11 +575,19 @@ fn rewrite_grep_to_rg(tokens: &[ParsedToken], command_index: usize) -> GrepRewri
 
     // Insert -F right after rg if needed and not already present from fgrep.
     if need_fixed_strings && !is_fgrep {
-        let rg_pos = command_index; // rg is at this position in parts after wrappers
-        parts.insert(rg_pos + 1, "-F".to_string());
+        suggestion.insert_str(fixed_strings_insert_at, " -F");
     }
 
-    GrepRewrite::Exact(parts.join(" "))
+    GrepRewrite::Exact(suggestion)
+}
+
+fn push_suggestion_part(output: &mut String, part: &str, has_parts: &mut bool) {
+    if *has_parts {
+        output.push(' ');
+    } else {
+        *has_parts = true;
+    }
+    output.push_str(part);
 }
 
 enum LongFlagResult {
