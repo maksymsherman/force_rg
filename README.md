@@ -119,6 +119,32 @@ Detection is not limited to a single bare command. The matcher handles full path
 
 The Rust binary handles hard blocking and JSON hook integration. The shipped `AGENTS.md`, `GEMINI.md`, and `SKILL.md` files explain the broader "use `rg` unless structure matters, then use `ast-grep`" policy.
 
+## Performance
+
+`force_rg` is meant to stay enabled in the hook path, so evaluator overhead matters.
+
+Using the built-in benchmark mode on a release build of `enforce-rg-command`:
+
+| Case | Example input | Average per evaluation |
+|---|---|---:|
+| Allowed command | `rg TODO .` | `0.0889 us` (`0.0000000889 s`) |
+| Blocked command | `grep -rn TODO .` | `0.2074 us` (`0.0000002074 s`) |
+
+These numbers measure the command evaluator inside the binary. End-to-end hook wall time will be higher because shell startup, process startup, and agent hook plumbing sit outside this benchmark.
+
+Reproduce locally:
+
+```sh
+cargo build --release
+./target/release/enforce-rg-command \
+  --benchmark-command 'rg TODO .' \
+  --iterations 5000000
+
+./target/release/enforce-rg-command \
+  --benchmark-command 'grep -rn TODO .' \
+  --iterations 5000000
+```
+
 ## Comparison
 
 | Approach | Enforces at shell boundary | Suggests exact rewrites | Blocks unsafe flag guesses | Agent-aware docs included |
