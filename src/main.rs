@@ -474,17 +474,19 @@ fn evaluate_segment(tokens: &[ParsedToken<'_>]) -> Option<BlockDecision> {
                     continue;
                 }
 
-                if is_shell_assignment(value) {
-                    continue;
-                }
-
                 match classify_token(value) {
                     TokenKind::Wrapper => {
                         wrapper = wrapper_kind(value);
                     }
                     TokenKind::Rg => return None,
                     TokenKind::GrepLike => return Some(build_grep_decision(tokens, index)),
-                    TokenKind::Other => return None,
+                    TokenKind::Other => {
+                        if is_shell_assignment(value) {
+                            continue;
+                        }
+
+                        return None;
+                    }
                 }
             }
         }
