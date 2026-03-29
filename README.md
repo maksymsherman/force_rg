@@ -397,6 +397,10 @@ enforce-rg-command --configure-gemini-hook ~/.gemini/settings.json enforce-rg-co
 
 Codex uses a `PreToolUse` hook with the `Bash` matcher. Hooks are currently behind a feature flag in `~/.codex/config.toml`.
 
+Codex hooks are experimental, and the current Codex docs note that Windows support is temporarily disabled.
+
+Important caveat: Codex currently applies this policy at the `PreToolUse` Bash interception point. That means `force_rg` sees and can block direct Bash commands such as `grep -rn TODO .`, but it does not inspect the contents of a script that Codex writes to disk and later runs with `bash script.sh`. Treat this as a workflow guardrail, not a sandbox or hard security boundary.
+
 `~/.codex/config.toml`
 
 ```toml
@@ -438,6 +442,8 @@ Then make sure `~/.codex/config.toml` contains:
 [features]
 codex_hooks = true
 ```
+
+Then restart Codex so the new hook state loads.
 
 ## Architecture
 
@@ -533,6 +539,7 @@ rg --help
 - Only high-confidence flag mappings are rewritten. Many grep flags are intentionally left unsupported.
 - Automatic hook configuration exists for Claude Code, Gemini CLI, and Codex.
 - Codex hooks are experimental and currently disabled on Windows.
+- In Codex, this policy currently applies to direct `Bash` tool invocations. It can block `grep -rn TODO .`, but it does not inspect script contents that are written to disk and later executed with `bash`.
 - The main install path builds locally. There are no prebuilt binaries or package-manager releases documented in this repo today.
 
 ## FAQ
@@ -556,6 +563,10 @@ Because enforcement and instruction solve different problems. The binary blocks 
 ### If Codex hooks are enabled, do I still need `AGENTS.md`?
 
 No for enforcement. Yes only if you also want prompt-level guidance about when to choose `rg` versus `ast-grep` before a shell command is even attempted.
+
+### Does this stop Codex from writing a shell script that runs `grep` later?
+
+No. In Codex, the hook currently inspects the direct `Bash` command string before execution. It can block `grep -rn TODO .`, but if Codex writes a script file and later runs `bash script.sh`, the hook sees `bash script.sh`, not the script body. That is why this README describes Codex support as a guardrail rather than a complete enforcement boundary.
 
 ### Does this support `ast-grep`?
 
