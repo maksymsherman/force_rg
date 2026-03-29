@@ -49,6 +49,69 @@ hash_file() {
   exit 1
 }
 
+enable_codex_hooks_in_config() {
+  local config_path="$1"
+  local config_dir
+  local tmp
+
+  config_dir="$(dirname "$config_path")"
+  mkdir -p "$config_dir"
+
+  if [ ! -f "$config_path" ]; then
+    cat > "$config_path" <<'EOF'
+[features]
+codex_hooks = true
+EOF
+    return
+  fi
+
+  tmp="$(mktemp)"
+  awk '
+    function emit_codex_flag() {
+      print "codex_hooks = true"
+      codex_flag_written = 1
+    }
+
+    /^[[:space:]]*\[[^]]+\][[:space:]]*$/ {
+      if (in_features && !codex_flag_written) {
+        emit_codex_flag()
+      }
+
+      in_features = ($0 ~ /^[[:space:]]*\[features\][[:space:]]*$/)
+      if (in_features) {
+        features_section_seen = 1
+      }
+
+      print
+      next
+    }
+
+    in_features && /^[[:space:]]*codex_hooks[[:space:]]*=/ {
+      if (!codex_flag_written) {
+        emit_codex_flag()
+      }
+      next
+    }
+
+    { print }
+
+    END {
+      if (in_features && !codex_flag_written) {
+        emit_codex_flag()
+      }
+
+      if (!features_section_seen) {
+        if (NR > 0) {
+          print ""
+        }
+        print "[features]"
+        print "codex_hooks = true"
+      }
+    }
+  ' "$config_path" > "$tmp"
+  mv "$tmp" "$config_path"
+}
+
 print_dry_run_plan() {
   local codex_home_dir="${CODEX_HOME:-$HOME/.codex}"
 
@@ -65,7 +128,8 @@ print_dry_run_plan() {
   echo "  4. Install or update $INSTALL_DIR/$BINARY_NAME if needed"
   echo "  5. If Claude Code is present, update $HOME/.claude/settings.json via $BINARY_NAME --configure-claude-hook"
   echo "  6. If Gemini CLI is present, update $HOME/.gemini/settings.json via $BINARY_NAME --configure-gemini-hook"
-  echo "  7. Copy SKILL.md to $codex_home_dir/skills/force-rg/SKILL.md"
+  echo "  7. Ensure $codex_home_dir/config.toml enables codex_hooks = true"
+  echo "  8. Update $codex_home_dir/hooks.json via $BINARY_NAME --configure-codex-hook"
   echo "Inspect locally before running:"
   echo "  git clone $REPO"
   echo "  cd force_rg"
@@ -173,7 +237,7 @@ if [ -d "${HOME}/.claude" ]; then
   info "Detected Claude Code"
 
   if [ -f "$CLAUDE_SETTINGS" ]; then
-    "$SOURCE_BINARY" --configure-claude-hook "$CLAUDE_SETTINGS" "$BINARY_NAME"
+    "$SOURCE_BINARY" --configure-claude-hook "$CLAUDE_SETTINGS" "$TARGET_BINARY"
     ok "Claude Code configured"
   else
     warn "Claude Code detected but could not configure hooks automatically"
@@ -197,18 +261,20 @@ if [ -d "${HOME}/.gemini" ]; then
 
   [ -f "$GEMINI_SETTINGS" ] || echo '{}' > "$GEMINI_SETTINGS"
 
-  "$SOURCE_BINARY" --configure-gemini-hook "$GEMINI_SETTINGS" "$BINARY_NAME"
+  "$SOURCE_BINARY" --configure-gemini-hook "$GEMINI_SETTINGS" "$TARGET_BINARY"
   ok "Gemini CLI configured"
 fi
 
-# --- install Codex skill ---
+# --- configure Codex ---
 
 CODEX_HOME_DIR="${CODEX_HOME:-$HOME/.codex}"
-CODEX_SKILLS="$CODEX_HOME_DIR/skills"
-SKILL_DIR="$CODEX_SKILLS/force-rg"
-mkdir -p "$SKILL_DIR"
-cp "$TMPDIR/force_rg/SKILL.md" "$SKILL_DIR/SKILL.md"
-ok "Codex skill installed to $SKILL_DIR"
+CODEX_CONFIG="$CODEX_HOME_DIR/config.toml"
+CODEX_HOOKS="$CODEX_HOME_DIR/hooks.json"
+mkdir -p "$CODEX_HOME_DIR"
+[ -f "$CODEX_HOOKS" ] || printf '{}\n' > "$CODEX_HOOKS"
+enable_codex_hooks_in_config "$CODEX_CONFIG"
+"$SOURCE_BINARY" --configure-codex-hook "$CODEX_HOOKS" "$TARGET_BINARY"
+ok "Codex configured"
 
 # --- done ---
 

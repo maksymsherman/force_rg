@@ -10,11 +10,15 @@ grep      egrep      fgrep
              rg
 ```
 
+<div align="center">
+
 [![Rust 2021](https://img.shields.io/badge/Rust-2021-orange?logo=rust)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Agents](https://img.shields.io/badge/Agents-Claude%20Code%20%7C%20Gemini%20%7C%20Codex-blue)](#installation)
 
-Conservative grep-to-rg enforcement for coding agents. `force_rg` blocks `grep`, `egrep`, and `fgrep`, suggests the least invasive exact `rg` rewrite when the mapping is clear, and refuses to guess when it is not.
+Shell-hook enforcement for ripgrep-first workflows in Codex, Claude Code, and Gemini. `force_rg` blocks `grep`, `egrep`, and `fgrep`, suggests the least invasive exact `rg` rewrite when the mapping is clear, and refuses to guess when it is not.
+
+</div>
 
 Quick install:
 
@@ -22,7 +26,7 @@ Quick install:
 curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_rg/main/install.sh | bash
 ```
 
-This installer builds `enforce-rg-command`, installs it to `~/.local/bin/`, configures Claude Code and Gemini hooks when possible, and copies the Codex skill to `${CODEX_HOME:-~/.codex}/skills/force-rg`. It requires `cargo` and `rg`.
+This installer builds `enforce-rg-command`, installs it to `~/.local/bin/`, configures Claude Code and Gemini hooks when possible, and enables Codex hooks in `${CODEX_HOME:-~/.codex}`. It requires `cargo` and `rg`.
 
 ## TL;DR
 
@@ -46,8 +50,8 @@ Telling agents "use `rg` instead of `grep`" works until it does not. They fall b
 | Exact rewrites | Drops only redundant flags like `-r`, `-n`, and `-E` when `rg` already defaults to them | Keeps suggestions minimal and predictable |
 | Conservative blocking | Refuses to translate uncertain flags like `-s`, `-h`, `-L`, or `--include` | Prevents subtle behavior drift |
 | Wrapper-aware detection | Catches `grep` behind `sudo`, `env`, `time`, `nohup`, shell assignments, pipes, and chained commands | Works in real shell usage, not just toy examples |
-| Hook integration | Consumes Claude/Gemini hook JSON, emits JSON for Claude, and uses exit-status blocking for Gemini | Fits agent workflows directly |
-| Policy file distribution | Ships `AGENTS.md`, `GEMINI.md`, and `SKILL.md` alongside the binary | Covers both hard enforcement and soft guidance |
+| Hook integration | Consumes Codex, Claude, and Gemini hook payloads and emits the blocking format each runtime expects | Fits agent workflows directly |
+| Optional policy files | Ships `AGENTS.md` and `GEMINI.md` alongside the binary | Reinforces prompt-level guidance without replacing hooks |
 
 Common outcomes:
 
@@ -65,7 +69,7 @@ Common outcomes:
 # Inspect the installer without executing anything.
 curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_rg/main/install.sh | bash -s -- --dry-run
 
-# Install the binary, hooks, and Codex skill.
+# Install the binary and configure hooks.
 curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_rg/main/install.sh | bash
 
 # Exact rewrite with a redundant grep command.
@@ -77,9 +81,9 @@ enforce-rg-command --command 'fgrep literal README.md'
 # Unsafe flag: blocked without guessing.
 enforce-rg-command --command 'grep -s TODO README.md'
 
-# Claude-style hook JSON input.
+# Codex/Claude-style hook JSON input.
 printf '%s' '{"tool_input":{"command":"grep -rn TODO ."}}' \
-  | enforce-rg-command --claude-hook-json
+  | enforce-rg-command --codex-hook-json
 
 # Benchmark matcher overhead locally.
 enforce-rg-command --benchmark-command 'grep -rn TODO .' --iterations 100000
@@ -117,7 +121,7 @@ Detection is not limited to a single bare command. The matcher handles full path
 
 ### 4. Separate Enforcement From Guidance
 
-The Rust binary handles hard blocking and JSON hook integration. The shipped `AGENTS.md`, `GEMINI.md`, and `SKILL.md` files explain the broader "use `rg` unless structure matters, then use `ast-grep`" policy.
+The Rust binary handles hard blocking and JSON hook integration. Optional `AGENTS.md` and `GEMINI.md` files can reinforce the broader "use `rg` unless structure matters, then use `ast-grep`" policy at prompt time.
 
 ## Performance
 
@@ -159,7 +163,7 @@ Warm-cache sample measurements from one machine, estimated by batching 200 invoc
 | Direct CLI allow | `--command 'rg TODO .'` | `3.7 ms` |
 | Direct CLI block | `--command 'grep -rn TODO .'` | `3.7 ms` |
 | Stdin command block | `--stdin-command` with `grep -rn TODO .` | `4.0 ms` |
-| Claude hook JSON block | `--claude-hook-json` with `tool_input.command` | `4.8 ms` |
+| Codex/Claude hook JSON block | `--codex-hook-json` with `tool_input.command` | `4.8 ms` |
 
 That practical number is what matters in agent use. The gap between the microbenchmark and the real hook cost comes from shell startup, process startup, CLI parsing, stdin reads, JSON parsing, output formatting, and pipe plumbing. Results will vary across machines, but the overall shape is the same: the evaluator itself is effectively free, while the subprocess hook architecture costs low single-digit milliseconds per invocation.
 
@@ -177,6 +181,18 @@ Notes:
 - A shell alias can silently change behavior instead of explaining the translation.
 - Plain repo instructions are useful, but they are advisory unless your agent actually respects them.
 - `force_rg` is opinionated about safety: blocked is better than a wrong rewrite.
+
+When to use `force_rg`:
+
+- You want hard enforcement at the shell boundary instead of relying on prompt compliance.
+- You care about conservative rewrites and would rather block than guess.
+- You run agents across Codex, Claude Code, or Gemini and want one consistent policy.
+
+When `force_rg` might not be ideal:
+
+- You only need written guidance and do not want a blocking hook.
+- Your workflow depends on grep flags that do not map cleanly to `rg` and you prefer manual review.
+- You need Windows support for Codex hooks today.
 
 ## Installation
 
@@ -201,7 +217,7 @@ What the installer does:
 3. Compares SHA-256 hashes with any installed binary.
 4. Installs or updates `~/.local/bin/enforce-rg-command`.
 5. Configures Claude Code and Gemini hooks when their config directories are present.
-6. Copies `SKILL.md` into `${CODEX_HOME:-~/.codex}/skills/force-rg`.
+6. Enables Codex hooks in `${CODEX_HOME:-~/.codex}/config.toml` and `${CODEX_HOME:-~/.codex}/hooks.json`.
 
 ### Option 2: `cargo install`
 
@@ -211,7 +227,7 @@ cd force_rg
 cargo install --path . --bin enforce-rg-command
 ```
 
-This installs the binary but does not configure hooks or copy the Codex skill automatically.
+This installs the binary but does not configure hooks automatically.
 
 ### Option 3: Build and copy manually
 
@@ -229,19 +245,16 @@ Then configure hooks yourself:
 mkdir -p ~/.gemini
 [ -f ~/.gemini/settings.json ] || printf '{}\n' > ~/.gemini/settings.json
 enforce-rg-command --configure-gemini-hook ~/.gemini/settings.json enforce-rg-command
+mkdir -p ~/.codex
+[ -f ~/.codex/hooks.json ] || printf '{}\n' > ~/.codex/hooks.json
+enforce-rg-command --configure-codex-hook ~/.codex/hooks.json ~/.local/bin/enforce-rg-command
 ```
 
-For Claude Code, either create `~/.claude/settings.json` first or add the hook snippet manually from the configuration section below.
+For Claude Code, either create `~/.claude/settings.json` first or add the hook snippet manually from the configuration section below. For Codex, also set `codex_hooks = true` under `[features]` in `~/.codex/config.toml`.
 
 ### Option 4: Policy files only
 
-If you do not want the binary yet, you can still distribute the agent guidance files:
-
-```sh
-git clone https://github.com/maksymsherman/force_rg.git ~/.codex/skills/force-rg
-```
-
-Or copy the repo-local guidance files into another project:
+If you do not want the binary yet, you can still copy the repo-local guidance files into another project:
 
 ```sh
 cp AGENTS.md /path/to/project/AGENTS.md
@@ -254,7 +267,7 @@ This gives agents the policy text, but it is not equivalent to shell-hook enforc
 
 1. Run the installer dry-run if you want to inspect the exact plan first.
 2. Install the tool with the one-line installer or build it from source.
-3. Restart any running Claude, Gemini, or Codex sessions so new hooks and skills load.
+3. Restart any running Claude, Gemini, or Codex sessions so new hooks load.
 4. Verify that `rg` passes and `grep` gets blocked:
 
 ```sh
@@ -274,9 +287,11 @@ The binary is named `enforce-rg-command`.
 | `--command <text>` | Evaluate one shell command string directly | `enforce-rg-command --command 'grep -rn TODO .'` |
 | `--stdin-command` | Read the command string from stdin | `printf '%s\n' 'grep -rn TODO .' \| enforce-rg-command --stdin-command` |
 | `--claude-hook-json` | Read Claude hook JSON from stdin and emit JSON block decisions | `printf '%s' '{"tool_input":{"command":"grep -rn TODO ."}}' \| enforce-rg-command --claude-hook-json` |
+| `--codex-hook-json` | Read Codex hook JSON from stdin and emit JSON block decisions | `printf '%s' '{"tool_input":{"command":"grep -rn TODO ."}}' \| enforce-rg-command --codex-hook-json` |
 | `--gemini-hook-json` | Read Gemini hook JSON from stdin and emit text or success exit status | `printf '%s' '{"tool_input":{"command":"grep -rn TODO ."}}' \| enforce-rg-command --gemini-hook-json` |
 | `--benchmark-command <text>` | Run the matcher repeatedly and print timing stats | `enforce-rg-command --benchmark-command 'grep -rn TODO .' --iterations 100000` |
 | `--configure-claude-hook <settings> <binary>` | Add the Claude hook entry to a settings file | `enforce-rg-command --configure-claude-hook ~/.claude/settings.json enforce-rg-command` |
+| `--configure-codex-hook <hooks> <binary>` | Add the Codex hook entry to a hooks file | `enforce-rg-command --configure-codex-hook ~/.codex/hooks.json ~/.local/bin/enforce-rg-command` |
 | `--configure-gemini-hook <settings> <binary>` | Add the Gemini hook entry to a settings file | `enforce-rg-command --configure-gemini-hook ~/.gemini/settings.json enforce-rg-command` |
 
 Exit codes:
@@ -380,24 +395,48 @@ enforce-rg-command --configure-gemini-hook ~/.gemini/settings.json enforce-rg-co
 
 ### Codex
 
-Codex uses a skill file, not a shell hook entry.
+Codex uses a `PreToolUse` hook with the `Bash` matcher. Hooks are currently behind a feature flag in `~/.codex/config.toml`.
 
-Global install:
+`~/.codex/config.toml`
 
-```sh
-git clone https://github.com/maksymsherman/force_rg.git ~/.codex/skills/force-rg
+```toml
+[features]
+codex_hooks = true
 ```
 
-Installer target:
+`~/.codex/hooks.json`
 
-```text
-${CODEX_HOME:-~/.codex}/skills/force-rg/SKILL.md
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.local/bin/enforce-rg-command --codex-hook-json"
+          }
+        ]
+      }
+    ]
+  }
+}
 ```
 
-Project-local fallback:
+Automatic configuration:
 
 ```sh
-cp AGENTS.md /path/to/project/AGENTS.md
+mkdir -p ~/.codex
+[ -f ~/.codex/hooks.json ] || printf '{}\n' > ~/.codex/hooks.json
+enforce-rg-command --configure-codex-hook ~/.codex/hooks.json ~/.local/bin/enforce-rg-command
+```
+
+Then make sure `~/.codex/config.toml` contains:
+
+```toml
+[features]
+codex_hooks = true
 ```
 
 ## Architecture
@@ -406,7 +445,7 @@ cp AGENTS.md /path/to/project/AGENTS.md
                          +-------------------+
                          |  AGENTS.md        |
                          |  GEMINI.md        |
-                         |  SKILL.md         |
+                         |  ~/.codex/hooks.json |
                          +---------+---------+
                                    |
                                    v
@@ -472,6 +511,10 @@ enforce-rg-command --configure-claude-hook ~/.claude/settings.json enforce-rg-co
 
 Make sure you restarted the running Gemini session after editing `~/.gemini/settings.json`. Existing sessions will usually keep old hook state.
 
+### Codex hook exists but does not fire
+
+Make sure `~/.codex/config.toml` has `[features]` with `codex_hooks = true`, and restart the running Codex session after editing `~/.codex/hooks.json`.
+
 ### A grep command was blocked without a replacement
 
 That is expected for uncertain flags. Re-run the command after translating the flagged options manually against `rg --help`.
@@ -488,7 +531,8 @@ rg --help
 - This tool only targets `grep`, `egrep`, and `fgrep`. It does not enforce `rg` over `awk`, `sed`, `find`, or other search patterns.
 - It does not auto-execute the suggested `rg` replacement. It blocks and explains instead.
 - Only high-confidence flag mappings are rewritten. Many grep flags are intentionally left unsupported.
-- Automatic hook configuration exists for Claude Code and Gemini. Codex integration is via skill files, not hook patching.
+- Automatic hook configuration exists for Claude Code, Gemini CLI, and Codex.
+- Codex hooks are experimental and currently disabled on Windows.
 - The main install path builds locally. There are no prebuilt binaries or package-manager releases documented in this repo today.
 
 ## FAQ
@@ -505,13 +549,13 @@ Yes. `rg` and `ripgrep` pass through unchanged.
 
 Yes. Commands like `cat file.txt | grep pattern` and `cd /tmp && grep -rn TODO .` are still detected and blocked.
 
-### Why ship `AGENTS.md`, `GEMINI.md`, and `SKILL.md` if the binary already exists?
+### Why ship `AGENTS.md` and `GEMINI.md` if the binary already exists?
 
 Because enforcement and instruction solve different problems. The binary blocks shell commands. The policy files teach agents when to use `rg` and when `ast-grep` is the better tool.
 
-### Can I use just the Codex skill without installing the binary?
+### If Codex hooks are enabled, do I still need `AGENTS.md`?
 
-Yes. Cloning the repo into `~/.codex/skills/force-rg` gives Codex the policy text, but it does not enforce shell-hook blocking.
+No for enforcement. Yes only if you also want prompt-level guidance about when to choose `rg` versus `ast-grep` before a shell command is even attempted.
 
 ### Does this support `ast-grep`?
 

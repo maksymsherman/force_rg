@@ -40,15 +40,18 @@ fn run() -> Result<i32, String> {
     let config = Config::parse(env::args().skip(1))?;
 
     match config.mode {
-        Mode::Evaluate { input, claude_json } => {
+        Mode::Evaluate {
+            input,
+            json_block_output,
+        } => {
             let raw = match input {
                 InputMode::Command(text) => text,
                 InputMode::StdinCommand => read_stdin()?,
-                InputMode::ClaudeHookJson => extract_claude_command(&read_stdin()?)?,
+                InputMode::HookJson => extract_tool_input_command(&read_stdin()?)?,
             };
 
             match evaluate_command(raw.trim()) {
-                Some(decision) if claude_json => {
+                Some(decision) if json_block_output => {
                     println!(
                         "{{\"decision\":\"block\",\"reason\":\"{}\"}}",
                         escape_json(&decision.message)
@@ -105,6 +108,13 @@ fn run() -> Result<i32, String> {
             configure_gemini_hook(&settings_path, &binary_name)?;
             Ok(0)
         }
+        Mode::ConfigureCodexHook {
+            settings_path,
+            binary_name,
+        } => {
+            configure_codex_hook(&settings_path, &binary_name)?;
+            Ok(0)
+        }
     }
 }
 
@@ -117,7 +127,7 @@ struct Config {
 enum Mode {
     Evaluate {
         input: InputMode,
-        claude_json: bool,
+        json_block_output: bool,
     },
     Benchmark {
         command: String,
@@ -131,13 +141,17 @@ enum Mode {
         settings_path: String,
         binary_name: String,
     },
+    ConfigureCodexHook {
+        settings_path: String,
+        binary_name: String,
+    },
 }
 
 #[derive(Debug)]
 enum InputMode {
     Command(String),
     StdinCommand,
-    ClaudeHookJson,
+    HookJson,
 }
 
 impl Config {
@@ -146,10 +160,11 @@ impl Config {
         I: IntoIterator<Item = String>,
     {
         let mut input: Option<InputMode> = None;
-        let mut claude_json = false;
+        let mut json_block_output = false;
         let mut benchmark_command: Option<String> = None;
         let mut configure_claude_hook: Option<(String, String)> = None;
         let mut configure_gemini_hook: Option<(String, String)> = None;
+        let mut configure_codex_hook: Option<(String, String)> = None;
         let mut iterations = 100_000u64;
 
         let mut iter = args.into_iter();
@@ -165,14 +180,18 @@ impl Config {
                     input = Some(InputMode::StdinCommand);
                 }
                 "--claude-hook-json" => {
-                    input = Some(InputMode::ClaudeHookJson);
-                    claude_json = true;
+                    input = Some(InputMode::HookJson);
+                    json_block_output = true;
+                }
+                "--codex-hook-json" => {
+                    input = Some(InputMode::HookJson);
+                    json_block_output = true;
                 }
                 "--gemini-hook-json" => {
-                    input = Some(InputMode::ClaudeHookJson);
+                    input = Some(InputMode::HookJson);
                 }
                 "--claude-json" => {
-                    claude_json = true;
+                    json_block_output = true;
                 }
                 "--benchmark-command" => {
                     let value = iter
@@ -198,6 +217,15 @@ impl Config {
                     })?;
                     configure_gemini_hook = Some((settings_path, binary_name));
                 }
+                "--configure-codex-hook" => {
+                    let settings_path = iter.next().ok_or_else(|| {
+                        "missing settings path for --configure-codex-hook".to_string()
+                    })?;
+                    let binary_name = iter.next().ok_or_else(|| {
+                        "missing binary name for --configure-codex-hook".to_string()
+                    })?;
+                    configure_codex_hook = Some((settings_path, binary_name));
+                }
                 "--iterations" => {
                     let value = iter
                         .next()
@@ -211,7 +239,7 @@ impl Config {
                     return Ok(Self {
                         mode: Mode::Evaluate {
                             input: InputMode::Command(String::new()),
-                            claude_json: false,
+                            json_block_output: false,
                         },
                     });
                 }
@@ -248,19 +276,31 @@ impl Config {
             });
         }
 
+        if let Some((settings_path, binary_name)) = configure_codex_hook {
+            return Ok(Self {
+                mode: Mode::ConfigureCodexHook {
+                    settings_path,
+                    binary_name,
+                },
+            });
+        }
+
         let input = input.ok_or_else(|| {
-            "expected one of --command, --stdin-command, or --claude-hook-json".to_string()
+            "expected one of --command, --stdin-command, --claude-hook-json, --codex-hook-json, or --gemini-hook-json".to_string()
         })?;
 
         Ok(Self {
-            mode: Mode::Evaluate { input, claude_json },
+            mode: Mode::Evaluate {
+                input,
+                json_block_output,
+            },
         })
     }
 }
 
 fn print_usage() {
     println!(
-        "Usage:\n  enforce-rg-command --command \"grep -rn pattern .\" [--claude-json]\n  enforce-rg-command --stdin-command [--claude-json]\n  enforce-rg-command --claude-hook-json\n  enforce-rg-command --gemini-hook-json\n  enforce-rg-command --benchmark-command \"grep -rn pattern .\" [--iterations 1000000]\n  enforce-rg-command --configure-claude-hook <settings-path> <binary-name>\n  enforce-rg-command --configure-gemini-hook <settings-path> <binary-name>"
+        "Usage:\n  enforce-rg-command --command \"grep -rn pattern .\" [--claude-json]\n  enforce-rg-command --stdin-command [--claude-json]\n  enforce-rg-command --claude-hook-json\n  enforce-rg-command --codex-hook-json\n  enforce-rg-command --gemini-hook-json\n  enforce-rg-command --benchmark-command \"grep -rn pattern .\" [--iterations 1000000]\n  enforce-rg-command --configure-claude-hook <settings-path> <binary-name>\n  enforce-rg-command --configure-gemini-hook <settings-path> <binary-name>\n  enforce-rg-command --configure-codex-hook <hooks-path> <binary-name>"
     );
 }
 
@@ -925,6 +965,15 @@ fn configure_gemini_hook(settings_path: &str, binary_name: &str) -> Result<(), S
     )
 }
 
+fn configure_codex_hook(settings_path: &str, binary_name: &str) -> Result<(), String> {
+    configure_agent_hook(
+        settings_path,
+        "PreToolUse",
+        "Bash",
+        &format!("{binary_name} --codex-hook-json"),
+    )
+}
+
 fn configure_agent_hook(
     settings_path: &str,
     phase: &str,
@@ -1024,7 +1073,7 @@ fn ensure_array<'a>(value: &'a mut Value, context: &str) -> Result<&'a mut Vec<V
         .ok_or_else(|| format!("{context} must be a JSON array"))
 }
 
-fn extract_claude_command(input: &str) -> Result<String, String> {
+fn extract_tool_input_command(input: &str) -> Result<String, String> {
     let mut parser = JsonParser::new(input);
     let command = parser
         .parse_root_for_tool_input_command()?
@@ -1541,11 +1590,11 @@ mod tests {
     }
 
     #[test]
-    fn parses_claude_hook_json() {
+    fn parses_tool_hook_json() {
         let input =
             r#"{"tool_name":"Bash","tool_input":{"command":"grep -rn pattern .","cwd":"/tmp"}}"#;
         assert_eq!(
-            extract_claude_command(input).unwrap(),
+            extract_tool_input_command(input).unwrap(),
             "grep -rn pattern .".to_string()
         );
     }
@@ -1554,9 +1603,43 @@ mod tests {
     fn parses_escaped_json_command() {
         let input = r#"{"tool_input":{"command":"grep -rn \"pattern\" .","cwd":"/tmp"}}"#;
         assert_eq!(
-            extract_claude_command(input).unwrap(),
+            extract_tool_input_command(input).unwrap(),
             "grep -rn \"pattern\" .".to_string()
         );
+    }
+
+    #[test]
+    fn parses_codex_hook_flag() {
+        let config = Config::parse(["--codex-hook-json".to_string()]).unwrap();
+
+        match config.mode {
+            Mode::Evaluate {
+                input: InputMode::HookJson,
+                json_block_output: true,
+            } => {}
+            mode => panic!("unexpected mode: {mode:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_codex_hook_configuration_flag() {
+        let config = Config::parse([
+            "--configure-codex-hook".to_string(),
+            "/tmp/hooks.json".to_string(),
+            "/tmp/enforce-rg-command".to_string(),
+        ])
+        .unwrap();
+
+        match config.mode {
+            Mode::ConfigureCodexHook {
+                settings_path,
+                binary_name,
+            } => {
+                assert_eq!(settings_path, "/tmp/hooks.json");
+                assert_eq!(binary_name, "/tmp/enforce-rg-command");
+            }
+            mode => panic!("unexpected mode: {mode:?}"),
+        }
     }
 
     #[test]
@@ -1587,6 +1670,41 @@ mod tests {
                   "hooks": [{
                     "type": "command",
                     "command": "enforce-rg-command --claude-hook-json"
+                  }]
+                }]
+              }
+            })
+        );
+    }
+
+    #[test]
+    fn updates_codex_hook_settings_without_duplicates() {
+        let mut settings = json!({});
+
+        update_hook_settings(
+            &mut settings,
+            "PreToolUse",
+            "Bash",
+            "/tmp/enforce-rg-command --codex-hook-json",
+        )
+        .unwrap();
+        update_hook_settings(
+            &mut settings,
+            "PreToolUse",
+            "Bash",
+            "/tmp/enforce-rg-command --codex-hook-json",
+        )
+        .unwrap();
+
+        assert_eq!(
+            settings,
+            json!({
+              "hooks": {
+                "PreToolUse": [{
+                  "matcher": "Bash",
+                  "hooks": [{
+                    "type": "command",
+                    "command": "/tmp/enforce-rg-command --codex-hook-json"
                   }]
                 }]
               }
